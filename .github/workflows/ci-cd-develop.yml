@@ -1,0 +1,83 @@
+name: Node.js CI/CD to AWS ECR (Develop/Staging)
+
+# 1. 🎯 Adaptación de Triggers
+# Este pipeline ahora solo escucha la rama 'develop'
+on:
+  push:
+    branches:
+      - develop
+  pull_request:
+    branches:
+      - develop
+
+jobs:
+  # ==========================================
+  # Fase CI: Build y Pruebas con Caché NPM
+  # ==========================================
+  ci-validation:
+    name: Validación de Código (CI)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js (con Caché)
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ vars.NODE_VERSION || '20' }}
+          # 5.2 Implementación A: Caché de Dependencias (Node.js)
+          cache: 'npm' 
+
+      - name: Instalar dependencias exactas
+        run: npm ci
+
+      - name: 🔒 Verificación de Compliance
+        run: npm audit --audit-level=critical
+
+      - name: 🧪 Ejecución de Pruebas
+        run: npm test
+
+  # ==========================================
+  # Fase CD: Contenerización con Registry Cache
+  # ==========================================
+  cd-containerization:
+    name: Contenerización y Push a ECR
+    runs-on: ubuntu-latest
+    needs: ci-validation
+    
+    # 2. 🛡️ Adaptación de Condicionales (if)
+    # Evitamos que se genere y suba una imagen de contenedor en un Pull Request
+    if: ${{ github.event_name != 'pull_request' }}
+    
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      # 3. 🔑 Ajuste de Variables y Secretos
+      - name: Configurar Credenciales de AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Login a Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Configuramos Buildx, un requisito para poder usar características avanzadas de caché en Docker
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build, tag, y push a ECR (Con Caché Docker)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          # Construimos la URI utilizando la variable dinámica vars.ECR_REPOSITORY
+          tags: ${{ steps.login-ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY || 'mi-app-frontend' }}:${{ github.sha }},${{ steps.login-ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY || 'mi-app-frontend' }}:latest
+          
+          # 5.3 Implementación B: Caché de Capas Docker (Registry Cache)
+          cache-from: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY || 'mi-app-frontend' }}:buildcache
+          cache-to: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY || 'mi-app-frontend' }}:buildcache,mode=max
